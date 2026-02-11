@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Claw Guard 🦞🛡️ - Skill Security Auditor for OpenClaw.
-A tool to scan OpenClaw skills for potentially malicious code patterns.
+Claw Guard 🦞🛡️ v3 - Intelligent Security Auditor for OpenClaw.
+Features: Comment awareness, Risk categorization, and User-controlled installation.
 """
 import os
 import sys
@@ -18,41 +18,40 @@ RISK_LEVELS = {
 
 SENSITIVE_PATTERNS = {
     RISK_LEVELS["CRITICAL"]: {
-        "description": "High risk of user privacy or credential theft.",
         "patterns": {
-            r"USER\.md|MEMORY\.md|memory/": "Access to long-term memory or user profile.",
-            r"\.env|openclaw\.json": "Access to global configuration or secrets.",
-            r"id_rsa|id_ed25519|\.ssh": "Access to private SSH keys.",
-            r"credentials|api_key|password|token": "Detection of sensitive credential-related keywords.",
-            r"eval\(|exec\(": "Dynamic code execution (highly dangerous)."
+            r"(?<!['\"])(USER\.md|MEMORY\.md|memory/|id_rsa|id_ed25519|\.ssh)": "Unauthorized access to sensitive user files/keys.",
+            r"\.env|openclaw\.json": "Attempting to access global secrets or configuration.",
+            r"credentials|api_key|password|token": "Sensitive credential keywords found.",
+            r"eval\(|exec\(": "Highly dangerous dynamic code execution."
         }
     },
     RISK_LEVELS["WARNING"]: {
-        "description": "Environment access or suspicious network communication.",
         "patterns": {
-            r"os\.environ|os\.getenv|process\.env": "Reading environment variables.",
-            r"axios\.post|requests\.post|urllib\.request\.urlopen": "Outbound data transmission.",
+            r"process\.env|os\.environ|os\.getenv": "Reading environment variables.",
+            r"axios\.post|requests\.post|urllib\.request\.urlopen": "Outbound data transmission detected.",
             r"webhook|socket|https?://(?!github\.com|openclaw\.ai)": "Communication with non-standard domains.",
             r"subprocess|spawn|system\(": "Shell command execution."
         }
-    },
-    RISK_LEVELS["INFO"]: {
-        "description": "General system observations.",
-        "patterns": {
-            r"\.sh|\.bash": "Inclusion of shell scripts.",
-            r"chmod|chown": "File permission modifications."
-        }
     }
 }
+
+def is_comment(line):
+    """Simple check to skip common comment patterns."""
+    l = line.strip()
+    return l.startswith('#') or l.startswith('//') or l.startswith('*') or l.startswith('/*')
 
 def scan_file(file_path):
     findings = []
     try:
         content = file_path.read_text(errors='ignore')
         lines = content.splitlines()
-        for risk_name, config in SENSITIVE_PATTERNS.items():
-            for pattern, reason in config["patterns"].items():
-                for i, line in enumerate(lines):
+        for i, line in enumerate(lines):
+            # Skip if it's a comment to reduce false positives
+            if is_comment(line):
+                continue
+                
+            for risk_name, config in SENSITIVE_PATTERNS.items():
+                for pattern, reason in config["patterns"].items():
                     if re.search(pattern, line, re.IGNORECASE):
                         findings.append({
                             "level": risk_name,
@@ -68,7 +67,7 @@ def scan_file(file_path):
 def main():
     parser = argparse.ArgumentParser(description="Claw Guard - Audit OpenClaw skills for security.")
     parser.add_argument("path", help="Path to the skill directory to audit")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed line contents")
+    parser.add_argument("--force", "-f", action="store_true", help="Non-interactive mode (for CI/CD)")
     args = parser.parse_args()
 
     skill_path = Path(args.path)
@@ -93,25 +92,39 @@ def main():
                 print(f"\n📂 File: {rel_path}")
                 for f in findings:
                     print(f"  [{f['level']}] {f['reason']}")
-                    print(f"    └─ Line {f['line_no']}: Found '{f['pattern']}'")
-                    if args.verbose:
-                        print(f"    └─ Code: {f['line_content']}")
+                    print(f"    └─ Line {f['line_no']}: Found '{f['pattern']}' -> {f['line_content']}")
                     if f['level'] in total_findings:
                         total_findings[f['level']] += 1
 
     print("\n" + "=" * 80)
     print(f"📊 Audit Summary ({file_count} files scanned):")
     for level, count in total_findings.items():
-        print(f"  {level}: {count}")
+        if count > 0:
+            print(f"  {level}: {count}")
     
-    print("\n💡 Recommendation:")
-    if total_findings[RISK_LEVELS["CRITICAL"]] > 0:
-        print("  ❌ BLOCK: Critical risks detected. Do not install without thorough code review.")
-        sys.exit(1)
-    elif total_findings[RISK_LEVELS["WARNING"]] > 0:
-        print("  ⚠️ REVIEW: Medium risks detected. Verify if environment/network access is justified.")
+    # Decisions
+    has_critical = total_findings[RISK_LEVELS["CRITICAL"]] > 0
+    has_warning = total_findings[RISK_LEVELS["WARNING"]] > 0
+
+    if has_critical:
+        print("\n❌ [ACTION REQUIRED] Critical risks detected!")
+        if args.force:
+            print("Force mode enabled, but blocking due to critical risk.")
+            sys.exit(1)
+        else:
+            choice = input("\nDo you want to PROCEED with the installation despite these risks? (y/N): ").strip().lower()
+            if choice == 'y':
+                print("\n✅ User authorized. Proceeding to installation...")
+                sys.exit(0)
+            else:
+                print("\n🛑 Installation blocked by user.")
+                sys.exit(1)
+    elif has_warning:
+        print("\n⚠️  [NOTICE] Medium risks detected. Please review manually.")
+        sys.exit(0)
     else:
-        print("  ✅ PASS: No significant security risks found.")
+        print("\n✅ PASS: No significant security risks found.")
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()
