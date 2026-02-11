@@ -1,30 +1,47 @@
 #!/usr/bin/env python3
+"""
+Claw Guard 🦞🛡️ - Skill Security Auditor for OpenClaw.
+A tool to scan OpenClaw skills for potentially malicious code patterns.
+"""
 import os
 import sys
 import re
+import argparse
 from pathlib import Path
 
-# Risk levels and their patterns
+# --- Configuration ---
+RISK_LEVELS = {
+    "CRITICAL": "🔴 CRITICAL",
+    "WARNING": "🟡 WARNING ",
+    "INFO": "🔵 INFO    "
+}
+
 SENSITIVE_PATTERNS = {
-    "CRITICAL (高危 - 隐私泄露)": {
-        "level": "🔴 HIGH",
-        "patterns": [
-            r"USER\.md", r"MEMORY\.md", r"memory/", r"\.env", r"openclaw\.json", 
-            r"id_rsa", r"id_ed25519", r"\.ssh", r"credentials", r"api_key", r"password"
-        ]
+    RISK_LEVELS["CRITICAL"]: {
+        "description": "High risk of user privacy or credential theft.",
+        "patterns": {
+            r"USER\.md|MEMORY\.md|memory/": "Access to long-term memory or user profile.",
+            r"\.env|openclaw\.json": "Access to global configuration or secrets.",
+            r"id_rsa|id_ed25519|\.ssh": "Access to private SSH keys.",
+            r"credentials|api_key|password|token": "Detection of sensitive credential-related keywords.",
+            r"eval\(|exec\(": "Dynamic code execution (highly dangerous)."
+        }
     },
-    "WARNING (中危 - 环境访问/外部通信)": {
-        "level": "🟡 MEDIUM",
-        "patterns": [
-            r"process\.env", r"os\.environ", r"os\.getenv", r"getenv", 
-            r"axios\.post", r"requests\.post", r"webhook", r"socket"
-        ]
+    RISK_LEVELS["WARNING"]: {
+        "description": "Environment access or suspicious network communication.",
+        "patterns": {
+            r"os\.environ|os\.getenv|process\.env": "Reading environment variables.",
+            r"axios\.post|requests\.post|urllib\.request\.urlopen": "Outbound data transmission.",
+            r"webhook|socket|https?://(?!github\.com|openclaw\.ai)": "Communication with non-standard domains.",
+            r"subprocess|spawn|system\(": "Shell command execution."
+        }
     },
-    "INFO (低危 - 脚本执行)": {
-        "level": "🔵 LOW",
-        "patterns": [
-            r"subprocess", r"sh ", r"bash ", r"system\(", r"exec\(", r"eval\("
-        ]
+    RISK_LEVELS["INFO"]: {
+        "description": "General system observations.",
+        "patterns": {
+            r"\.sh|\.bash": "Inclusion of shell scripts.",
+            r"chmod|chown": "File permission modifications."
+        }
     }
 }
 
@@ -32,62 +49,69 @@ def scan_file(file_path):
     findings = []
     try:
         content = file_path.read_text(errors='ignore')
-        for category, info in SENSITIVE_PATTERNS.items():
-            for pattern in info["patterns"]:
-                matches = re.findall(pattern, content, re.IGNORECASE)
-                if matches:
-                    findings.append({
-                        "category": category,
-                        "level": info["level"],
-                        "pattern": pattern,
-                        "count": len(matches)
-                    })
+        lines = content.splitlines()
+        for risk_name, config in SENSITIVE_PATTERNS.items():
+            for pattern, reason in config["patterns"].items():
+                for i, line in enumerate(lines):
+                    if re.search(pattern, line, re.IGNORECASE):
+                        findings.append({
+                            "level": risk_name,
+                            "pattern": pattern,
+                            "reason": reason,
+                            "line_no": i + 1,
+                            "line_content": line.strip()[:80]
+                        })
     except Exception as e:
-        findings.append({"category": "Error", "level": "UNKNOWN", "pattern": str(e), "count": 0})
+        findings.append({"level": "ERROR", "pattern": "FILE_READ", "reason": str(e), "line_no": 0, "line_content": ""})
     return findings
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 skill_scanner.py <path_to_skill_directory>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Claw Guard - Audit OpenClaw skills for security.")
+    parser.add_argument("path", help="Path to the skill directory to audit")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed line contents")
+    args = parser.parse_args()
 
-    skill_path = Path(sys.argv[1])
+    skill_path = Path(args.path)
     if not skill_path.is_dir():
         print(f"Error: {skill_path} is not a directory.")
         sys.exit(1)
 
-    print(f"\n🛡️  Skills 安全审计报告: {skill_path.name}")
-    print("=" * 60)
+    print(f"\n🛡️  Claw Guard: Auditing '{skill_path.name}'")
+    print("=" * 80)
     
-    risk_summary = {"🔴 HIGH": 0, "🟡 MEDIUM": 0, "🔵 LOW": 0}
+    total_findings = {l: 0 for l in RISK_LEVELS.values()}
     file_count = 0
     
     for root, dirs, files in os.walk(skill_path):
-        if ".git" in root: continue
+        if ".git" in root or "node_modules" in root: continue
         for file in files:
             file_count += 1
             file_path = Path(root) / file
             findings = scan_file(file_path)
             if findings:
                 rel_path = file_path.relative_to(skill_path)
-                print(f"\n📂 文件: {rel_path}")
+                print(f"\n📂 File: {rel_path}")
                 for f in findings:
-                    print(f"  [{f['level']}] {f['category']}: 发现 '{f['pattern']}' ({f['count']} 次)")
-                    risk_summary[f['level']] += 1
+                    print(f"  [{f['level']}] {f['reason']}")
+                    print(f"    └─ Line {f['line_no']}: Found '{f['pattern']}'")
+                    if args.verbose:
+                        print(f"    └─ Code: {f['line_content']}")
+                    if f['level'] in total_findings:
+                        total_findings[f['level']] += 1
 
-    print("\n" + "=" * 60)
-    print(f"📊 审计汇总 ({file_count} 个文件):")
-    print(f"  - 高危 (🔴): {risk_summary['🔴 HIGH']}")
-    print(f"  - 中危 (🟡): {risk_summary['🟡 MEDIUM']}")
-    print(f"  - 低危 (🔵): {risk_summary['🔵 LOW']}")
+    print("\n" + "=" * 80)
+    print(f"📊 Audit Summary ({file_count} files scanned):")
+    for level, count in total_findings.items():
+        print(f"  {level}: {count}")
     
-    if risk_summary['🔴 HIGH'] > 0:
-        print("\n❌ 结论: 发现高危隐私访问风险！在未手动确认前，禁止执行安装。")
+    print("\n💡 Recommendation:")
+    if total_findings[RISK_LEVELS["CRITICAL"]] > 0:
+        print("  ❌ BLOCK: Critical risks detected. Do not install without thorough code review.")
         sys.exit(1)
-    elif risk_summary['🟡 MEDIUM'] > 0:
-        print("\n⚠️ 结论: 存在敏感操作，请核对网络/环境调用是否必要。")
+    elif total_findings[RISK_LEVELS["WARNING"]] > 0:
+        print("  ⚠️ REVIEW: Medium risks detected. Verify if environment/network access is justified.")
     else:
-        print("\n✅ 结论: 扫描通过，未发现明显的隐私风险点。")
+        print("  ✅ PASS: No significant security risks found.")
 
 if __name__ == "__main__":
     main()
